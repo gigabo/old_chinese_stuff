@@ -1,0 +1,221 @@
+#!/usr/bin/perl -w
+package main;
+use strict;
+
+use Text::Wrap qw( wrap );
+use LWP::UserAgent;
+use Encode qw/encode decode/;
+use Digest::MD5 qw(md5_base64);
+use Getopt::Long;
+Getopt::Long::Configure ("bundling");
+
+use utf8;
+
+binmode (STDERR, ":utf8");
+binmode (STDOUT, ":utf8");
+
+my %opts;
+my $args = "N";
+
+my @reqs = qw(
+  v|verbose+
+);
+GetOptions( \%opts, @reqs ) or print_usage_and_exit();
+
+my ($verbose) = @opts{qw( v )};
+
+my %freq = ();
+my %mean = ();
+my %pron = ();
+
+my $nchars = 1;
+
+load_list(\%freq);
+
+freq_list(\%freq);
+
+sub freq_list {
+  my ($hr) = @_;
+
+  my $ffn = "freq.$nchars";
+
+  open my $ffh, "<:utf8", $ffn or die "Couldn't open '$ffn' for read: $!";
+  while (my $rec = <$ffh>){
+    chomp($rec);
+    $rec =~ /^(?:#|$)/ and next;
+    my ($c, $n) = split (/\t/, $rec);
+
+    $c or next;
+
+    $hr->{$c} = $n;
+
+  }
+  
+  close $ffh;
+}
+
+my @sorted = grep {$mean{$_} && $pron{$_}}
+	     sort {$freq{$b} <=> $freq{$a}} keys %freq;
+
+for my $key (@sorted){
+  $pron{$key} = join('; ', @{$pron{$key}});
+  $mean{$key} = join('; ', @{$mean{$key}});
+}
+#$Text::Wrap::columns = 80;
+
+my $lvl = 0;
+my @attempts;
+my @score;
+my $total = shift @ARGV || 10;
+my $choices = shift @ARGV || 4;
+my $done;
+for ($done = 0; $done < $total; $done++){
+  $attempts[$lvl] ++;
+  $score[$lvl] += question ($lvl);
+  if (($score[$lvl] / $attempts[$lvl]) >= .5){
+    $lvl++;
+  } else {
+    $lvl--;
+  }
+  if ($lvl < 0){
+    $lvl = 0;
+  } elsif ($lvl > 30) {
+    $lvl = 30;
+  }
+}
+
+my @gseen;
+sub question {
+  my ($n) = @_;
+
+  my %pseen;
+  my $lo = $n * 100;
+  my $c = $lo + int(rand(100));
+  while ($gseen[$c]){
+    $c = $lo + int(rand(100));
+  }
+  my @i;
+  my @lseen;
+  $gseen[$c] = 1;
+  $lseen[$c] = 1;
+  $pseen{$pron{$sorted[$c]}} = 1;
+  while (@i < ($choices - 1)){
+    my $i = $lo + int(rand(100));
+    if (!$lseen[$i] && !$pseen{$pron{$sorted[$i]}}) {
+      push @i, $i;
+      $lseen[$i] = 1;
+      $pseen{$pron{$sorted[$i]}} = 1; # Don't allow 
+    }
+  }
+  my $sec = $verbose?" (section $lvl)":'';
+  printf ("\n%3d/%3d:\t$sorted[$c]$sec\n", $done+1, $total);
+  for my $tuple ((['pronunciation', \%pron], ['meaning', \%mean])){
+    my ($label, $hr) = @$tuple;
+    my $p = int(rand($choices));
+    print "\n$label:\n";
+    my $j = 0;
+    for (my $i = 0; $i < $choices; $i++){
+      print +($i+1).".\t";
+      my $val;
+      if ($i == $p){
+	$val = $hr->{$sorted[$c]};
+      } else {
+	my $bad = $i[$j++];
+	$val = $hr->{$sorted[$bad]};
+      }
+      print wrap( '', ' ' x 8, $val );
+      print "\n";
+    }
+    print "? ";
+    (my $response = <STDIN>) =~ s/\D//g;
+
+    if (!(length ($response) && (--$response == $p))) {
+      print "\nIncorrect:\n";
+      print wrap ('', ' ' x 11, "\tp: $pron{$sorted[$c]}\n");
+      print wrap ('', ' ' x 11, "\tm: $mean{$sorted[$c]}\n");
+      return 0;
+    }
+  }
+  print "\nCorrect!\n\n";
+  return 1;
+}
+
+my $score;
+for my $i (0..$#score){
+  $score += int(100*($score[$i] / $attempts[$i]));
+}
+print "\n\nscore: $score\n";
+
+sub load_list {
+  my ($hr) = @_;
+
+  my $dfn = "cedict_ts.u8";
+
+  open my $dfh, "<:utf8", $dfn or die "Couldn't open '$dfn' for read: $!";
+  while (my $rec = <$dfh>){
+    $rec =~ /^#/ and next;
+    my ($word, $pron, $mean) =
+      $rec =~ /^[^ ]+ ([^ ]+) \[([^\]]+)\] \/(.*)\//;
+    if (length($word) == $nchars){
+      $hr->{$word} = 0;
+      $mean{$word} ||= [];
+      $pron{$word} ||= [];
+      $pron = pinyinify($pron);
+      (grep {$_ eq $mean}@{$mean{$word}}) or push @{$mean{$word}}, $mean;
+      (grep {$_ eq $pron}@{$pron{$word}}) or push @{$pron{$word}}, $pron;
+    }
+  }
+  scalar(keys(%$hr))
+    or die "I don't know any words with $nchars characters\n";
+}
+
+sub print_help_and_exit {
+  system("perldoc $0");
+  exit;
+}
+
+sub print_usage_and_exit {
+  my $msg = shift || '';
+
+  print STDERR "\n$msg\n\nUsage: $0 [options] $args\n",
+    join("\n",map{"  ".$_||''}@reqs),"\n";
+
+  exit;
+}
+
+sub pinyinify {
+  my ($text) = @_;
+  my @ret;
+  my %conv = (
+    a => [qw( ā á ǎ à )],
+    o => [qw( ō ó ǒ ò )],
+    e => [qw( ē é ě è )],
+    i => [qw( ī í ǐ ì )],
+    u => [qw( ū ú ǔ ù )],
+    v => [qw( ǖ ǘ ǚ ǜ )],
+    A => [qw( Ā Á Ǎ À )],
+    O => [qw( Ō Ó Ǒ Ò )],
+    E => [qw( Ē É Ě È )],
+  );
+
+  $text =~ s/u:/v/g;
+
+  while ($text =~ /([a-zA-Z]+)(\d?)/g){
+    my ($word, $tone) = ($1, $2);
+
+    if ($tone and $tone < 5){
+      $tone--;
+      if ($word =~ s/(a|e)/$conv{$1}[$tone]/i){
+      } elsif ($word =~ s/ou/$conv{o}[$tone]u/){
+      } else {
+	$word =~ s/([aoeiuv])([^aoeiuv]|$)/$conv{$1}[$tone]$2/i;
+      }
+    }
+  
+    push @ret, $word;
+
+  }
+
+
+  return join(' ', @ret);
+}

@@ -1,0 +1,264 @@
+#!/usr/bin/perl -w
+
+package Text::ZH::Profile;
+
+
+
+package main;
+use strict;
+
+use LWP::UserAgent;
+use Encode qw/encode decode/;
+use Digest::MD5 qw(md5_base64);
+use Getopt::Long;
+Getopt::Long::Configure ("bundling");
+
+use utf8;
+
+binmode (STDERR, ":utf8");
+binmode (STDOUT, ":utf8");
+
+my %opts;
+
+my @reqs = qw(
+  v|verbose+
+  m|match-pattern=s
+  n|n-pages=s
+  e|encoding=s
+  a|allow-query
+  s|skip-cache
+);
+GetOptions( \%opts, @reqs ) or print_usage_and_exit();
+
+my ($verbose, $mat_pat_str, $n, $encoding, $allow_query, $skip_cache)
+  = @opts{qw( v m n e a s )};
+
+$mat_pat_str ||= '.';
+$n ||= 10;
+$encoding ||= 'gb2312';
+
+my $args = "URL N-CHARACTERS";
+
+my $seed_url = shift @ARGV or print_usage_and_exit();
+my $nchars = shift @ARGV || 1;
+
+my $ua = LWP::UserAgent->new();
+my $mat_pat = qr/$mat_pat_str/;
+my $hanzi = "[\x{3400}-\x{4DBF}\x{4E00}-\x{9FAF}]";
+my $hanzipat_str = $hanzi x $nchars;
+my $hanzipat = qr/($hanzipat_str)/;
+my $single_hanzipat = qr/$hanzi/;
+my $kill_term = $allow_query?"[#]":"[?#]";
+
+($seed_url eq '-') or
+  $seed_url =~ /^http/ or $seed_url = join('://', 'http', $seed_url);
+
+my @queue = ($seed_url);
+my %done = ( $seed_url => 1 );
+my %freq = ();
+my %meaning = ();
+my %pron = ();
+
+load_list(\%freq);
+
+my ($base_url) = $seed_url =~ m#^(http://[^/]+)#;
+
+my $cdir = 'cache';
+sub cache_fn {
+  my ($url) = @_;
+  (my $cfn = $url) =~ s#/#__sl__#g;
+  my $md5 = md5_base64($cfn);
+  my $dir = join('/',$cdir,substr($md5, 0, 1),substr($md5, 1, 1));
+  -d $dir or (system("mkdir -p $dir") == 0) or die "Couldn't mkdir '$dir' $!";
+  join('/', $dir, $cfn);
+}
+
+my $i = 0;
+my $total = 0;
+my $single_total = 0;
+my $prelen = 0;
+while (my $url = shift @queue){
+  (++$i > $n) and last;
+
+  if ($verbose){
+    print STDERR scalar(@queue),"\t$i\tFetching '$url'...";
+  } else {
+    my $sstr = sprintf('%4.2f%%', $i / $n * 100);
+    print STDERR "\b" x $prelen;
+    print STDERR $sstr;
+    $prelen = length($sstr);
+  }
+  my $page;
+  if ($url eq '-'){
+    {
+      local $/ = undef;
+      $page = decode($encoding, <STDIN>);
+    }
+  } else {
+    my $cfn = cache_fn($url);
+    if (!$skip_cache and -f $cfn){
+      open my $cfh, "gzip -dc $cfn|" or die "Couldn't open '$cfn' for write: $!";
+      binmode $cfh, ":utf8";
+      {
+	local $/ = undef;
+	$page = <$cfh>;
+	$page or do {
+	  $i--;
+	  close $cfh;
+	  $verbose and print STDERR "cached (empty)\n";
+	  next;
+	};
+      }
+      close $cfh;
+      $verbose and print STDERR "cached\n";
+    } else {
+      open my $cfh, "|gzip -c > $cfn" or die "Couldn't open '$cfn' for write: $!";
+      binmode $cfh, ":utf8";
+      my $res = $ua->get($url);
+      if (!$res->is_success){
+	$verbose and print STDERR "failed\n";
+	$i--;
+	print $cfh $page || '';
+	close $cfh;
+	next;
+      }
+      $page = $res->content();
+      $page = decode($encoding, $page);
+      print $cfh $page;
+      close $cfh;
+      $verbose and print STDERR "ok\n";
+    }
+  }
+ NEW_URL:
+  while ($page =~ /<a href=['"]([^'"]+)/g){
+    (my $add = $1) =~ s/$kill_term.*$//;
+    $add =~ s/([()])/\\$1/g;
+    $add =~ $mat_pat or next NEW_URL;
+    if ($add =~ m#^http://#){
+      $add =~ /^$base_url/ or next NEW_URL;
+    } else {
+      $add =~ s#^/##;
+      $add = join('/', $base_url, $add);
+    }
+    $done{$add}++ or do{
+      push @queue, $add;
+    };
+  }
+
+  $page =~ s#<a[^>]+>.*?</a[^>]*>##ig;
+
+  if ($nchars != 1){
+    while ($page =~ /$single_hanzipat/og){
+      $single_total++;
+    }
+  }
+ 
+  while ($page =~ /$hanzipat/og){
+    my $word = $1;
+    if (exists($freq{$word}) or $nchars == 1){
+      $freq{$word}++;
+      $total++;
+    } else {
+      pos($page) -= $nchars-1;
+    }
+  }
+}
+$verbose or print STDERR "\b" x $prelen;
+
+for my $word (keys %freq){
+  $freq{$word} or delete $freq{$word};
+}
+print "#\t",scalar(keys %freq),"\tunique\n";
+print "#\t$total\ttotal\n";
+$nchars == 1 or print "#\t$single_total\ttotal chars\n";
+print "\n";
+my $cumu = 0;
+$i = 0;
+my $n_mil = $single_total / 1_000_000;
+my $pronlen = $nchars * 6;
+for my $char (sort {$freq{$b} <=> $freq{$a}} keys %freq){
+  $i++;
+  my $freq = $freq{$char};
+  $cumu += $freq;
+  my $perc_n = $cumu / $total * 100;
+  my $perc = ($perc_n == 100)?100:sprintf("%7.4f", $perc_n);
+#  $perc .= (' ' x (16 - length($perc)));
+  my $meaning = $meaning{$char} || '';
+  my $per_mil = ($nchars == 1)?0:sprintf("%7.2f", $freq / $n_mil);
+#  $per_mil .= (' ' x (8 - length($per_mil)));
+  my $pron = pinyinify($pron{$char} || '');
+  $pron .= (' ' x ($pronlen - length($pron)));
+
+  print join("\t",
+    $i, $char, $freq, ($nchars == 1)?$perc:$per_mil, $pron, $meaning
+  )."\n";
+}
+
+sub load_list {
+  my ($hr) = @_;
+
+  my $dfn = "cedict_ts.u8";
+
+  open my $dfh, "<:utf8", $dfn or die "Couldn't open '$dfn' for read: $!";
+  while (my $rec = <$dfh>){
+    $rec =~ /^#/ and next;
+    my ($word, $pron, $meaning) = $rec =~ /^[^ ]+ ([^ ]+) \[([^\]]+)\] \/(.*)\//;
+    if (length($word) == $nchars){
+      $hr->{$word} = 0;
+      $meaning{$word} = $meaning;
+      $pron{$word} = $pron;
+    }
+  }
+  scalar(keys(%$hr)) or die "I don't know any words with $nchars characters\n";
+}
+
+sub print_help_and_exit {
+  system("perldoc $0");
+  exit;
+}
+
+sub print_usage_and_exit {
+  my $msg = shift || '';
+
+  print STDERR "\n$msg\n\nUsage: $0 [options] $args\n",
+    join("\n",map{"  ".$_||''}@reqs),"\n";
+
+  exit;
+}
+
+sub pinyinify {
+  my ($text) = @_;
+  my @ret;
+  my %conv = (
+    a => [qw( ā á ǎ à )],
+    o => [qw( ō ó ǒ ò )],
+    e => [qw( ē é ě è )],
+    i => [qw( ī í ǐ ì )],
+    u => [qw( ū ú ǔ ù )],
+    v => [qw( ǖ ǘ ǚ ǜ )],
+    A => [qw( Ā Á Ǎ À )],
+    O => [qw( Ō Ó Ǒ Ò )],
+    E => [qw( Ē É Ě È )],
+  );
+
+  $text =~ s/u:/v/g;
+
+  while ($text =~ /([a-zA-Z]+)(\d?)/g){
+    my ($word, $tone) = ($1, $2);
+
+    if ($tone and $tone < 5){
+      $tone--;
+      if ($word =~ s/(a|e)/$conv{$1}[$tone]/i){
+      } elsif ($word =~ s/ou/$conv{o}[$tone]u/){
+      } else {
+	$word =~ s/([aoeiuv])([^aoeiuv]|$)/$conv{$1}[$tone]$2/i;
+      }
+    }
+  
+    push @ret, $word;
+
+  }
+
+
+  return join(' ', @ret);
+}

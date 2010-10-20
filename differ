@@ -1,0 +1,5 @@
+#!/bin/bash
+
+join -j2 <(tail -n +4 $1 | cut -f 1,2 | sort -k2,2) \
+  <(tail -n +4 $2 | cut -f 1,2 | sort -k2,2) | \
+  tr ' ' '\t' | sort -k2,2 -n | less

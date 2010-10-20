@@ -1,0 +1,4 @@
+This is some ancient stuff I built for analysing character/word frequencies
+on the web.  I used it as the basis of my old bozid.com (now deceased)
+character knowledge estimation tool.  Want to get it backed up, so I'm
+going to put it in a git repo and lob it onto github.

@@ -1,0 +1,100 @@
+#!/usr/bin/perl -w
+package main;
+use strict;
+
+use Text::Wrap qw( wrap );
+use LWP::UserAgent;
+use Encode qw/encode decode/;
+use Digest::MD5 qw(md5_base64);
+use Getopt::Long;
+Getopt::Long::Configure ("bundling");
+
+use utf8;
+
+binmode (STDERR, ":utf8");
+binmode (STDOUT, ":utf8");
+
+my %opts;
+my $args = "N";
+
+my @reqs = qw(
+  v|verbose+
+);
+GetOptions( \%opts, @reqs ) or print_usage_and_exit();
+
+my ($verbose) = @opts{qw( v )};
+
+#$Text::Wrap::columns = 80;
+
+my $lvl = 0;
+my @attempts;
+my @score;
+my $total = shift @ARGV || 10;
+my $choices = shift @ARGV || 4;
+my $done;
+sub load_list {
+  my ($hr) = @_;
+
+  my $dfn = "cedict_ts.u8";
+
+  open my $dfh, "<:utf8", $dfn or die "Couldn't open '$dfn' for read: $!";
+  while (my $rec = <$dfh>){
+    $rec =~ /^#/ and next;
+    my ($word, $pron, $mean) =
+      $rec =~ /^[^ ]+ ([^ ]+) \[([^\]]+)\] \/(.*)\//;
+    if (length($word) == 1){
+      print $rec;
+    }
+  }
+}
+load_list;
+sub print_help_and_exit {
+  system("perldoc $0");
+  exit;
+}
+
+sub print_usage_and_exit {
+  my $msg = shift || '';
+
+  print STDERR "\n$msg\n\nUsage: $0 [options] $args\n",
+    join("\n",map{"  ".$_||''}@reqs),"\n";
+
+  exit;
+}
+
+sub pinyinify {
+  my ($text) = @_;
+  my @ret;
+  my %conv = (
+    a => [qw( ā á ǎ à )],
+    o => [qw( ō ó ǒ ò )],
+    e => [qw( ē é ě è )],
+    i => [qw( ī í ǐ ì )],
+    u => [qw( ū ú ǔ ù )],
+    v => [qw( ǖ ǘ ǚ ǜ )],
+    A => [qw( Ā Á Ǎ À )],
+    O => [qw( Ō Ó Ǒ Ò )],
+    E => [qw( Ē É Ě È )],
+  );
+
+  $text =~ s/u:/v/g;
+
+  while ($text =~ /([a-zA-Z]+)(\d?)/g){
+    my ($word, $tone) = ($1, $2);
+
+    if ($tone and $tone < 5){
+      $tone--;
+      if ($word =~ s/(a|e)/$conv{$1}[$tone]/i){
+      } elsif ($word =~ s/ou/$conv{o}[$tone]u/){
+      } else {
+	$word =~ s/([aoeiuv])([^aoeiuv]|$)/$conv{$1}[$tone]$2/i;
+      }
+    }
+  
+    push @ret, $word;
+
+  }
+
+
+  return join(' ', @ret);
+}

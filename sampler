@@ -1,0 +1,11 @@
+#!/usr/bin/perl -w
+
+use strict;
+
+my $i = 0;
+
+while (my $line = <STDIN>){
+  if (!($i++ % 100)){
+    print $line;
+  }
+}

@@ -1,0 +1,29 @@
+#!/usr/bin/perl -w
+
+use strict;
+
+use Chart::Lines;
+
+my ($fn) = @ARGV;
+
+$fn or die "usage: $0 FN\n";
+
+open my $fh, $fn or die "Failed to open '$fn': $!";
+
+my (@n, @m);
+
+while (my $line = <$fh>){
+  my ($n, $m) = split (/\t/, $line);
+  $n += 0;
+  $m += 0;
+  ($n and $m) or next;
+  push @n, $n;
+  push @m, $m;
+}
+
+my $chart = Chart::Lines->new(1024,768);
+
+$chart->set(legend_labels => [ 'pages done', 'pages left' ]);
+$chart->set(skip_x_ticks => @n / 10);
+
+$chart->png ("chart.png",[ [0..$#n], \@m, \@n ]);
